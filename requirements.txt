@@ -1,0 +1,11 @@
+streamlit==1.35.0
+yfinance==0.2.40
+PyPortfolioOpt==1.5.5
+quantstats==0.0.62
+arch==6.3.0
+plotly==5.22.0
+numpy==1.26.4
+pandas==2.2.2
+scipy==1.13.1
+matplotlib==3.9.0
+seaborn==0.13.2
