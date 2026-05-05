@@ -1,11 +1,17 @@
-# QFA Prime Finance Platform — Streamlit v4.4 Stable Optimization Fix
+# QFA Prime Finance Platform — Streamlit v4.5 QuantStats + Strategy Education Fix
 
 ## Fixes
 
-- Added `scikit-learn` for PyPortfolioOpt Ledoit-Wolf covariance.
-- Optimization no longer crashes the full app if sklearn/PyPortfolioOpt preparation fails.
-- Sidebar explanations simplified.
-- All v4.3 features preserved.
+- QuantStats report generation now returns clear status.
+- App no longer shows only "QuantStats unavailable" without explanation.
+- If QuantStats fails, QFA Internal Tearsheet HTML is generated as fallback.
+- Added strategy-specific report downloads.
+- Added Portfolio Strategy Education tab.
+- All prior v4.4 features preserved.
+
+## Important
+
+QuantStats can fail on Streamlit Cloud due to rendering/dependency issues. v4.5 guarantees a downloadable internal institutional tearsheet even when QuantStats fails.
 
 ## Run
 

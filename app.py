@@ -33,6 +33,7 @@ from __future__ import annotations
 import os
 import io
 import sys
+import html
 import warnings
 import subprocess
 import importlib.util
@@ -115,7 +116,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-VERSION = "Streamlit Interactive v4.4 Stable Optimization Fix"
+VERSION = "Streamlit Interactive v4.5 QuantStats + Strategy Education Fix"
 TRADING_DAYS = 252
 DEFAULT_RF = 0.045
 MIN_START_DATE = dt.date(2018, 1, 1)
@@ -785,6 +786,56 @@ def metric_dictionary() -> pd.DataFrame:
     ])
 
 
+
+def portfolio_strategy_education_table() -> pd.DataFrame:
+    return pd.DataFrame([
+        {
+            "Strategy": "Equal Weight",
+            "Objective": "Simple diversified baseline.",
+            "How Weights Are Set": "Every selected instrument receives the same weight.",
+            "Best Used When": "The user wants a transparent benchmark portfolio without forecasts.",
+            "Main Strength": "Easy to understand; avoids model overfitting.",
+            "Main Risk": "Does not control volatility or concentration by risk.",
+            "User Interpretation": "This is the neutral starting point. Other strategies should be compared against it.",
+        },
+        {
+            "Strategy": "User Custom Weights",
+            "Objective": "User-defined allocation view.",
+            "How Weights Are Set": "Sidebar weight inputs are normalized to 100%.",
+            "Best Used When": "The user has a house view or target allocation.",
+            "Main Strength": "Full control and investment-policy alignment.",
+            "Main Risk": "Can become concentrated if user inputs are not disciplined.",
+            "User Interpretation": "This shows what happens if the portfolio follows the user’s own allocation preference.",
+        },
+        {
+            "Strategy": "Inverse Volatility",
+            "Objective": "Risk-balanced allocation proxy.",
+            "How Weights Are Set": "Lower-volatility instruments receive larger weights.",
+            "Best Used When": "The user wants a simple risk-aware portfolio without optimization assumptions.",
+            "Main Strength": "Reduces dominance of very volatile instruments.",
+            "Main Risk": "Can overweight low-volatility assets even when expected return is weak.",
+            "User Interpretation": "This is a practical defensive allocation method.",
+        },
+        {
+            "Strategy": "Max Sharpe",
+            "Objective": "Maximize expected return per unit of risk.",
+            "How Weights Are Set": "PyPortfolioOpt uses expected returns and covariance matrix under max-weight constraints.",
+            "Best Used When": "The user accepts model-based optimization and wants higher risk-adjusted return.",
+            "Main Strength": "Can identify efficient allocation mixes.",
+            "Main Risk": "Sensitive to expected-return estimates and covariance instability.",
+            "User Interpretation": "Use this as an optimized candidate, not as a blind final portfolio.",
+        },
+        {
+            "Strategy": "Min Volatility",
+            "Objective": "Minimize expected portfolio volatility.",
+            "How Weights Are Set": "PyPortfolioOpt minimizes covariance-driven portfolio variance under constraints.",
+            "Best Used When": "The user prioritizes stability and drawdown control.",
+            "Main Strength": "Usually produces a more defensive allocation.",
+            "Main Risk": "May sacrifice return and overweight low-volatility instruments.",
+            "User Interpretation": "This is the conservative optimization candidate.",
+        },
+    ])
+
 # ============================================================
 # STRATEGIES
 # ============================================================
@@ -1313,21 +1364,136 @@ def returns_csv(series_map: Dict[str, pd.Series]) -> bytes:
     return pd.concat(series_map, axis=1).to_csv().encode("utf-8")
 
 
-def quantstats_html(strategy_name: str, r: pd.Series, rf: float) -> Optional[bytes]:
+def _html_table(df: pd.DataFrame) -> str:
+    return df.to_html(index=False, border=0, classes="qfa-table", escape=False)
+
+
+def _fig_to_html(fig: go.Figure) -> str:
+    return fig.to_html(full_html=False, include_plotlyjs="cdn", config={"responsive": True, "displaylogo": False})
+
+
+def qfa_internal_tearsheet_html(
+    strategy_name: str,
+    r: pd.Series,
+    benchmark: pd.Series,
+    rf: float,
+    metrics_row: pd.Series,
+) -> bytes:
+    """
+    Guaranteed fallback report. This is not QuantStats, but it prevents
+    report generation from failing in Streamlit Cloud when QuantStats breaks.
+    """
+    p, b = align_two(r, benchmark, "Portfolio", "Benchmark")
+    eq = (1 + p).cumprod()
+    beq = (1 + b).cumprod()
+    dd = eq / eq.cummax() - 1
+    risk = rolling_var_cvar(p, 63)
+    te = rolling_tracking_error(p, b, 63)
+    beta = rolling_beta(p, b, 63)
+
+    fig_eq = go.Figure()
+    fig_eq.add_trace(go.Scatter(x=eq.index, y=eq.values, mode="lines", name=strategy_name, line=dict(color=QFA_COLORS["navy"], width=2.8)))
+    fig_eq.add_trace(go.Scatter(x=beq.index, y=beq.values, mode="lines", name=BENCHMARK_NAME, line=dict(color=QFA_COLORS["gray"], width=2.2, dash="dash")))
+    fig_eq = layout(fig_eq, f"{strategy_name} — Cumulative Return", 560)
+
+    fig_dd = go.Figure()
+    fig_dd.add_trace(go.Scatter(x=dd.index, y=dd.values, mode="lines", fill="tozeroy", name="Drawdown", line=dict(color=QFA_COLORS["risk_red"], width=2.2)))
+    fig_dd.update_yaxes(tickformat=".0%")
+    fig_dd = layout(fig_dd, f"{strategy_name} — Drawdown", 560)
+
+    fig_risk = make_subplots(rows=2, cols=1, shared_xaxes=True, subplot_titles=["Rolling Tracking Error", "Rolling Beta"])
+    fig_risk.add_trace(go.Scatter(x=te.index, y=te.values, mode="lines", name="Tracking Error", line=dict(color=QFA_COLORS["muted_gold"], width=2.2)), row=1, col=1)
+    fig_risk.add_trace(go.Scatter(x=beta.index, y=beta.values, mode="lines", name="Beta", line=dict(color=QFA_COLORS["slate"], width=2.2)), row=2, col=1)
+    fig_risk.update_yaxes(tickformat=".0%", row=1, col=1)
+    fig_risk = layout(fig_risk, f"{strategy_name} — Benchmark Relative Risk", 680)
+
+    fig_tail = go.Figure()
+    for i, col in enumerate(risk.columns):
+        fig_tail.add_trace(go.Scatter(x=risk.index, y=risk[col], mode="lines", name=col, line=dict(color=QFA_SEQUENCE[i % len(QFA_SEQUENCE)], width=2.0)))
+    fig_tail.update_yaxes(tickformat=".1%")
+    fig_tail = layout(fig_tail, f"{strategy_name} — Rolling VaR / CVaR", 560)
+
+    metrics_df = pd.DataFrame([{
+        "Strategy": strategy_name,
+        "Annual Return": f"{metrics_row['Annual Return']:.2%}",
+        "Annual Volatility": f"{metrics_row['Annual Volatility']:.2%}",
+        "Sharpe": f"{metrics_row['Sharpe']:.2f}",
+        "Max Drawdown": f"{metrics_row['Max Drawdown']:.2%}",
+        "VaR 95% Daily": f"{metrics_row['VaR 95% Daily']:.2%}",
+        "CVaR 95% Daily": f"{metrics_row['CVaR 95% Daily']:.2%}",
+        "Tracking Error": f"{metrics_row['Tracking Error vs Benchmark']:.2%}",
+        "Beta": f"{metrics_row['Beta vs Benchmark']:.2f}",
+        "Information Ratio": f"{metrics_row['Information Ratio']:.2f}",
+    }])
+
+    html_doc = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>QFA Internal Tearsheet — {html.escape(strategy_name)}</title>
+        <style>
+            body {{ font-family: DejaVu Sans, Segoe UI, Arial, sans-serif; background:#f5f7fb; color:#111827; margin:0; }}
+            header {{ background:#0f172a; color:white; padding:26px 34px; border-bottom:5px solid #b08900; }}
+            main {{ padding:28px 36px; }}
+            h1 {{ margin:0; font-size:30px; }}
+            .note {{ background:#fff7ed; border-left:5px solid #92400e; padding:14px 16px; border-radius:8px; color:#78350f; margin:16px 0; }}
+            .qfa-table {{ width:100%; border-collapse:collapse; background:white; margin:18px 0; border-radius:12px; overflow:hidden; }}
+            .qfa-table th {{ background:#111827; color:white; text-align:left; padding:10px; }}
+            .qfa-table td {{ border-bottom:1px solid #e5e7eb; padding:10px; }}
+        </style>
+    </head>
+    <body>
+        <header>
+            <h1>QFA Internal Tearsheet — {html.escape(strategy_name)}</h1>
+            <p>Fallback institutional report generated when QuantStats is unavailable or fails.</p>
+        </header>
+        <main>
+            <div class="note">This report is generated from the same strategy return stream used inside the dashboard. It includes performance, drawdown, benchmark-relative risk, VaR and CVaR.</div>
+            <h2>Key Metrics</h2>
+            {_html_table(metrics_df)}
+            {_fig_to_html(fig_eq)}
+            {_fig_to_html(fig_dd)}
+            {_fig_to_html(fig_risk)}
+            {_fig_to_html(fig_tail)}
+        </main>
+    </body>
+    </html>
+    """
+    return html_doc.encode("utf-8")
+
+
+def quantstats_html(strategy_name: str, r: pd.Series, rf: float) -> tuple[Optional[bytes], str]:
+    """
+    Returns (html_bytes, status_message). Does not crash the app.
+    """
     if not QS_AVAILABLE:
-        return None
+        return None, "QuantStats package is not available."
+
     path = f"qfa_quantstats_{strategy_name.lower().replace(' ', '_')}.html"
     try:
-        qs.reports.html(r.dropna(), benchmark=None, rf=rf, output=path, title=f"QFA Prime QuantStats — {strategy_name}")
+        clean = r.dropna().copy()
+        clean.index = pd.to_datetime(clean.index)
+        clean = clean.replace([np.inf, -np.inf], np.nan).dropna()
+        if len(clean) < MIN_OBSERVATIONS:
+            return None, "Not enough observations for QuantStats."
+
+        qs.reports.html(
+            clean,
+            benchmark=None,
+            rf=rf,
+            output=path,
+            title=f"QFA Prime QuantStats — {strategy_name}",
+        )
         with open(path, "rb") as f:
             data = f.read()
         try:
             os.remove(path)
         except Exception:
             pass
-        return data
-    except Exception:
-        return None
+        return data, "QuantStats report generated successfully."
+    except Exception as exc:
+        return None, f"QuantStats failed: {exc}"
 
 
 # ============================================================
@@ -1495,6 +1661,7 @@ def main():
         "Rolling Sharpe",
         "GARCH Volatility Lab",
         "QuantStats",
+        "Strategy Education",
         "Info Hub",
         "Data Quality",
         "Export Center",
@@ -1653,21 +1820,57 @@ def main():
             st.info("Enable 'Run GARCH Lab' in the sidebar.")
 
     with tabs[13]:
-        st.subheader("QuantStats")
-        st.markdown("<div class='qfa-note'>QuantStats report is generated for the selected strategy return stream.</div>", unsafe_allow_html=True)
-        qs_strategy = st.selectbox("QuantStats strategy", options=all_strategy_names, index=all_strategy_names.index(primary) if primary in all_strategy_names else 0)
-        qs_bytes = quantstats_html(qs_strategy, strategy_returns[qs_strategy], rf)
-        if qs_bytes:
+        st.subheader("QuantStats / QFA Tearsheet Reports")
+        st.markdown(
+            "<div class='qfa-note'>Report generation is strategy-specific. If QuantStats fails in Streamlit Cloud, QFA Internal Tearsheet is generated as a guaranteed fallback.</div>",
+            unsafe_allow_html=True,
+        )
+        qs_strategy = st.selectbox("Report strategy", options=all_strategy_names, index=all_strategy_names.index(primary) if primary in all_strategy_names else 0)
+        qs_bytes, qs_status = quantstats_html(qs_strategy, strategy_returns[qs_strategy], rf)
+        st.caption(qs_status)
+
+        selected_metric_row = all_strategy_metrics[all_strategy_metrics["Strategy / Instrument"] == qs_strategy].iloc[0]
+        fallback_bytes = qfa_internal_tearsheet_html(
+            qs_strategy,
+            strategy_returns[qs_strategy],
+            benchmark_returns,
+            rf,
+            selected_metric_row,
+        )
+
+        c_report_1, c_report_2 = st.columns(2)
+
+        with c_report_1:
+            if qs_bytes:
+                st.download_button(
+                    f"Download QuantStats HTML — {qs_strategy}",
+                    data=qs_bytes,
+                    file_name=f"qfa_quantstats_{qs_strategy.lower().replace(' ', '_')}.html",
+                    mime="text/html",
+                )
+            else:
+                st.warning("QuantStats could not be generated. Use the QFA Internal Tearsheet.")
+
+        with c_report_2:
             st.download_button(
-                f"Download QuantStats HTML — {qs_strategy}",
-                data=qs_bytes,
-                file_name=f"qfa_quantstats_{qs_strategy.lower().replace(' ', '_')}.html",
+                f"Download QFA Internal Tearsheet — {qs_strategy}",
+                data=fallback_bytes,
+                file_name=f"qfa_internal_tearsheet_{qs_strategy.lower().replace(' ', '_')}.html",
                 mime="text/html",
             )
-        else:
-            st.warning("QuantStats unavailable or report generation failed.")
+
+        st.subheader("Strategy Report Metrics")
+        safe_df(all_strategy_metrics[all_strategy_metrics["Strategy / Instrument"] == qs_strategy])
 
     with tabs[14]:
+        st.subheader("Portfolio Strategy Education")
+        st.markdown(
+            "<div class='qfa-note'>This table explains each portfolio strategy in plain language so users can understand objective, weighting logic, strengths and risks.</div>",
+            unsafe_allow_html=True,
+        )
+        safe_df(portfolio_strategy_education_table())
+
+    with tabs[15]:
         st.subheader("Info Hub")
         st.subheader("Proxy Transparency")
         safe_df(PROXY_TRANSPARENCY_TABLE)
@@ -1695,12 +1898,12 @@ def main():
             {"Item": "Benchmark", "Value": f"{BENCHMARK_NAME} ({BENCHMARK_TICKER})"},
         ]))
 
-    with tabs[15]:
+    with tabs[16]:
         st.subheader("Data Quality")
         safe_df(quality)
         st.caption(f"Aligned prices: {prices.shape}; aligned returns: {returns.shape}; benchmark returns: {benchmark_returns.shape}")
 
-    with tabs[16]:
+    with tabs[17]:
         st.subheader("Export Center")
         col1, col2, col3 = st.columns(3)
         with col1:
