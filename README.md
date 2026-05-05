@@ -1,18 +1,11 @@
-# QFA Prime Finance Platform — Streamlit v4.3 Institutional Transparency
+# QFA Prime Finance Platform — Streamlit v4.4 Stable Optimization Fix
 
-## v4.3 updates
+## Fixes
 
-- ETF proxy mode is explicitly visible in sidebar
-- Proxy mapping table is shown to the user
-- Futures mode remains selectable
-- No synthetic fallback
-- Advanced institutional KPI layout
-- Additional KPI command center row
-- Log-return difference tab
-- Bollinger bands for return-difference spreads
-- Rolling Sharpe tab
-- Underwater recovery chart
-- All previous parameters and features preserved
+- Added `scikit-learn` for PyPortfolioOpt Ledoit-Wolf covariance.
+- Optimization no longer crashes the full app if sklearn/PyPortfolioOpt preparation fails.
+- Sidebar explanations simplified.
+- All v4.3 features preserved.
 
 ## Run
 

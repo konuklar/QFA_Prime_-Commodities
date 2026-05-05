@@ -58,6 +58,7 @@ REQUIRED_PACKAGES = {
     "pypfopt": "PyPortfolioOpt",
     "quantstats": "quantstats",
     "scipy": "scipy",
+    "sklearn": "scikit-learn",
     "matplotlib": "matplotlib",
     "seaborn": "seaborn",
 }
@@ -114,7 +115,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-VERSION = "Streamlit Interactive v4.3 Institutional Transparency"
+VERSION = "Streamlit Interactive v4.4 Stable Optimization Fix"
 TRADING_DAYS = 252
 DEFAULT_RF = 0.045
 MIN_START_DATE = dt.date(2018, 1, 1)
@@ -815,10 +816,22 @@ def optimize_strategies(prices: pd.DataFrame, returns: pd.DataFrame, rf: float, 
     perf_rows = []
 
     if not PYPFOPT_AVAILABLE:
-        return strategy_returns, weights, pd.DataFrame([{"Strategy": "PyPortfolioOpt", "Error": "Package unavailable"}])
+        return strategy_returns, weights, pd.DataFrame([{"Strategy": "PyPortfolioOpt", "Error": "PyPortfolioOpt package unavailable"}])
 
-    mu = expected_returns.mean_historical_return(prices, frequency=TRADING_DAYS)
-    S = risk_models.CovarianceShrinkage(prices, frequency=TRADING_DAYS).ledoit_wolf()
+    if not _pkg_available("sklearn"):
+        return strategy_returns, weights, pd.DataFrame([{
+            "Strategy": "PyPortfolioOpt",
+            "Error": "scikit-learn is missing. Add scikit-learn to requirements.txt for Ledoit-Wolf covariance."
+        }])
+
+    try:
+        mu = expected_returns.mean_historical_return(prices, frequency=TRADING_DAYS)
+        S = risk_models.CovarianceShrinkage(prices, frequency=TRADING_DAYS).ledoit_wolf()
+    except Exception as exc:
+        return strategy_returns, weights, pd.DataFrame([{
+            "Strategy": "PyPortfolioOpt",
+            "Error": f"Covariance/expected-return preparation failed: {exc}"
+        }])
 
     try:
         ef = EfficientFrontier(mu, S, weight_bounds=(0, max_weight))
@@ -1340,7 +1353,6 @@ def main():
 
     with st.sidebar:
         st.header("Portfolio Gate")
-        st.caption("Interactive controls")
 
         if st.button("Clear cache"):
             clear_cache()
@@ -1349,21 +1361,20 @@ def main():
             "Data Universe",
             options=list(UNIVERSE_MODES.keys()),
             index=0,
-            help="ETF proxy mode uses real Yahoo-listed ETFs and is more stable on Streamlit Cloud. Futures mode uses CL=F, GC=F, SI=F, PL=F, NG=F.",
         )
         active_universe = UNIVERSE_MODES[universe_mode]
         COMMODITY_UNIVERSE = active_universe
 
         if "ETF Proxies" in universe_mode:
             st.markdown(
-                "<div class='qfa-transparency-badge'>ETF PROXY MODE ACTIVE — real Yahoo ETFs are used, not futures and not synthetic data.</div>",
+                "<div class='qfa-transparency-badge'>ETF PROXY MODE ACTIVE</div>",
                 unsafe_allow_html=True,
             )
             with st.expander("Show proxy mapping", expanded=True):
                 st.dataframe(PROXY_TRANSPARENCY_TABLE, use_container_width=True, hide_index=True)
         else:
             st.markdown(
-                "<div class='qfa-transparency-badge'>FUTURES MODE ACTIVE — Yahoo futures tickers are used directly.</div>",
+                "<div class='qfa-transparency-badge'>FUTURES MODE ACTIVE</div>",
                 unsafe_allow_html=True,
             )
 
@@ -1374,7 +1385,6 @@ def main():
         )
         display_to_ticker = {v["display"]: k for k, v in active_universe.items()}
         selected_tickers = [display_to_ticker[d] for d in selected_display]
-        st.caption("No synthetic fallback: ETF proxy mode still uses real Yahoo Finance instruments.")
 
         start_date = st.date_input("Start date", DEFAULT_START, min_value=MIN_START_DATE, max_value=DEFAULT_END)
         end_date = st.date_input("End date", DEFAULT_END, min_value=MIN_START_DATE, max_value=DEFAULT_END)
@@ -1439,7 +1449,7 @@ def main():
 
     except Exception as exc:
         st.error(f"Data error: {exc}")
-        st.info("Try ETF Proxy mode, fewer instruments, a longer date range, clear cache, or retry later if Yahoo throttles futures metadata.")
+        st.info("Try ETF Proxy mode, fewer instruments, longer date range, or clear cache.")
         return
 
     strategy_returns, strategy_weights, weights_df, opt_perf = build_strategy_set(prices, returns, rf, max_weight, custom_weights)
