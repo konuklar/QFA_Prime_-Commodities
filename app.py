@@ -37,6 +37,7 @@ import warnings
 import subprocess
 import importlib.util
 import datetime as dt
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional, Any
 
@@ -113,7 +114,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-VERSION = "Streamlit Interactive v4.1 Institutional Theme"
+VERSION = "Streamlit Interactive v4.3 Institutional Transparency"
 TRADING_DAYS = 252
 DEFAULT_RF = 0.045
 MIN_START_DATE = dt.date(2018, 1, 1)
@@ -133,6 +134,39 @@ COMMODITY_UNIVERSE: Dict[str, Dict[str, str]] = {
     "PL=F": {"name": "Platinum Futures", "class": "Precious Metals", "display": "Platinum"},
     "NG=F": {"name": "Natural Gas Futures", "class": "Energy", "display": "Natural Gas"},
 }
+
+COMMODITY_UNIVERSE_FUTURES = COMMODITY_UNIVERSE.copy()
+
+COMMODITY_UNIVERSE_ETF = {
+    "USO": {"name": "United States Oil Fund LP", "class": "Energy ETF Proxy", "display": "Crude Oil ETF Proxy"},
+    "GLD": {"name": "SPDR Gold Shares", "class": "Precious Metals ETF Proxy", "display": "Gold ETF Proxy"},
+    "SLV": {"name": "iShares Silver Trust", "class": "Precious Metals ETF Proxy", "display": "Silver ETF Proxy"},
+    "PPLT": {"name": "abrdn Physical Platinum Shares ETF", "class": "Precious Metals ETF Proxy", "display": "Platinum ETF Proxy"},
+    "UNG": {"name": "United States Natural Gas Fund LP", "class": "Energy ETF Proxy", "display": "Natural Gas ETF Proxy"},
+}
+
+UNIVERSE_MODES = {
+    "Yahoo ETF Proxies — more stable for Streamlit Cloud": COMMODITY_UNIVERSE_ETF,
+    "Yahoo Futures — CL=F / GC=F / SI=F / PL=F / NG=F": COMMODITY_UNIVERSE_FUTURES,
+}
+
+
+FUTURES_TO_PROXY_MAP = {
+    "CL=F": "USO",
+    "GC=F": "GLD",
+    "SI=F": "SLV",
+    "PL=F": "PPLT",
+    "NG=F": "UNG",
+}
+
+PROXY_TRANSPARENCY_TABLE = pd.DataFrame([
+    {"Exposure": "Crude Oil", "Futures Ticker": "CL=F", "ETF Proxy": "USO", "Proxy Name": "United States Oil Fund LP"},
+    {"Exposure": "Gold", "Futures Ticker": "GC=F", "ETF Proxy": "GLD", "Proxy Name": "SPDR Gold Shares"},
+    {"Exposure": "Silver", "Futures Ticker": "SI=F", "ETF Proxy": "SLV", "Proxy Name": "iShares Silver Trust"},
+    {"Exposure": "Platinum", "Futures Ticker": "PL=F", "ETF Proxy": "PPLT", "Proxy Name": "abrdn Physical Platinum Shares ETF"},
+    {"Exposure": "Natural Gas", "Futures Ticker": "NG=F", "ETF Proxy": "UNG", "Proxy Name": "United States Natural Gas Fund LP"},
+])
+
 
 GARCH_MODEL_OPTIONS = {
     "Fast Institutional": ["garch_t", "gjr_t", "tarch_t"],
@@ -259,6 +293,32 @@ st.markdown(
         .kpi-bad  { border-left: 6px solid #991b1b; }
         .kpi-neutral { border-left: 6px solid #334155; }
         .small-muted { color: #64748b; font-size: 12px; }
+        .qfa-transparency-badge {
+            background: #f8fafc;
+            border: 1px solid #cbd5e1;
+            color: #0f172a;
+            padding: 10px 12px;
+            border-radius: 12px;
+            font-size: 13px;
+            font-weight: 700;
+            margin: 8px 0 14px;
+        }
+        .qfa-kpi-band {
+            background: #ffffff;
+            border: 1px solid #e5e7eb;
+            border-radius: 20px;
+            padding: 16px;
+            margin-bottom: 14px;
+            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.05);
+        }
+        .qfa-kpi-band-title {
+            font-size: 13px;
+            color: #334155;
+            text-transform: uppercase;
+            letter-spacing: .09em;
+            font-weight: 900;
+            margin-bottom: 10px;
+        }
         .stTabs [data-baseweb="tab-list"] { gap: 8px; flex-wrap: wrap; }
         .stTabs [data-baseweb="tab"] {
             background: #ffffff;
@@ -347,8 +407,8 @@ def clear_cache():
 # ============================================================
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def download_yahoo_prices(tickers: Tuple[str, ...], start: str, end: str) -> pd.DataFrame:
-    raw = yf.download(
+def _download_yahoo_batch(tickers: Tuple[str, ...], start: str, end: str) -> pd.DataFrame:
+    return yf.download(
         tickers=list(tickers),
         start=start,
         end=end,
@@ -356,10 +416,50 @@ def download_yahoo_prices(tickers: Tuple[str, ...], start: str, end: str) -> pd.
         group_by="column",
         progress=False,
         threads=False,
+        ignore_tz=True,
+        repair=True,
+    )
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _download_yahoo_single(ticker: str, start: str, end: str) -> pd.Series:
+    raw = yf.download(
+        tickers=ticker,
+        start=start,
+        end=end,
+        auto_adjust=False,
+        progress=False,
+        threads=False,
+        ignore_tz=True,
+        repair=True,
     )
 
     if raw is None or raw.empty:
-        raise ValueError("Yahoo Finance returned no data. No synthetic fallback is used.")
+        raw = yf.Ticker(ticker).history(
+            start=start,
+            end=end,
+            auto_adjust=False,
+            actions=False,
+            repair=True,
+        )
+
+    if raw is None or raw.empty:
+        raise ValueError(f"{ticker}: Yahoo returned no data.")
+
+    if "Adj Close" in raw.columns:
+        s = raw["Adj Close"].copy()
+    elif "Close" in raw.columns:
+        s = raw["Close"].copy()
+    else:
+        raise ValueError(f"{ticker}: Yahoo output has no Adj Close or Close.")
+
+    s.name = ticker
+    return pd.to_numeric(s, errors="coerce")
+
+
+def _extract_adjclose_from_batch(raw: pd.DataFrame, tickers: Tuple[str, ...]) -> pd.DataFrame:
+    if raw is None or raw.empty:
+        return pd.DataFrame()
 
     if isinstance(raw.columns, pd.MultiIndex):
         if "Adj Close" in raw.columns.get_level_values(0):
@@ -367,7 +467,7 @@ def download_yahoo_prices(tickers: Tuple[str, ...], start: str, end: str) -> pd.
         elif "Close" in raw.columns.get_level_values(0):
             px = raw["Close"].copy()
         else:
-            raise ValueError("Yahoo output has no Adj Close or Close.")
+            return pd.DataFrame()
     else:
         if "Adj Close" in raw.columns:
             px = raw[["Adj Close"]].copy()
@@ -376,22 +476,69 @@ def download_yahoo_prices(tickers: Tuple[str, ...], start: str, end: str) -> pd.
             px = raw[["Close"]].copy()
             px.columns = list(tickers)[:1]
         else:
-            raise ValueError("Yahoo output has no Adj Close or Close.")
+            return pd.DataFrame()
+    return px
 
+
+def download_yahoo_prices(tickers: Tuple[str, ...], start: str, end: str) -> pd.DataFrame:
+    """
+    Robust Yahoo-only downloader:
+    batch download -> individual ticker retry -> Ticker.history retry.
+    No synthetic data is generated.
+    """
+    problems = []
+    frames = []
+
+    try:
+        batch_raw = _download_yahoo_batch(tickers, start, end)
+        batch_px = _extract_adjclose_from_batch(batch_raw, tickers)
+    except Exception as exc:
+        batch_px = pd.DataFrame()
+        problems.append(f"Batch download failed: {exc}")
+
+    if batch_px is not None and not batch_px.empty:
+        batch_px.index = pd.to_datetime(batch_px.index)
+        batch_px = batch_px.sort_index()
+        for t in tickers:
+            if t in batch_px.columns and batch_px[t].notna().sum() >= MIN_OBSERVATIONS:
+                frames.append(batch_px[t].rename(t))
+
+    done = {s.name for s in frames}
+
+    for t in tickers:
+        if t in done:
+            continue
+        try:
+            time.sleep(0.35)
+            frames.append(_download_yahoo_single(t, start, end))
+        except Exception as exc:
+            problems.append(f"{t}: {exc}")
+
+    if not frames:
+        raise ValueError(
+            "Yahoo Finance returned no usable data for selected tickers. "
+            "For commodity futures, this is commonly a Yahoo/yfinance timezone/throttling issue. "
+            "Use sidebar Data Universe = 'Yahoo ETF Proxies — more stable for Streamlit Cloud', "
+            "clear cache, or retry later. Details: " + " | ".join(problems[:8])
+        )
+
+    px = pd.concat(frames, axis=1)
+    px = px.loc[:, ~px.columns.duplicated()]
     px.index = pd.to_datetime(px.index)
     px = px[~px.index.duplicated(keep="last")]
     px = px.sort_index()
     px = px.replace([np.inf, -np.inf], np.nan)
+
     for col in px.columns:
         px[col] = pd.to_numeric(px[col], errors="coerce")
-    px = px.dropna(axis=1, how="all")
 
     ordered = [t for t in tickers if t in px.columns]
-    if ordered:
-        px = px[ordered]
+    px = px[ordered] if ordered else px
+    px = px.dropna(axis=1, how="all")
 
     if px.shape[1] == 0:
-        raise ValueError("No usable price series after Yahoo cleaning.")
+        raise ValueError("No usable Yahoo price series after robust retry engine.")
+
     return px
 
 
@@ -526,6 +673,39 @@ def rolling_var_cvar(r: pd.Series, window: int) -> pd.DataFrame:
             raw=True,
         )
     return out
+
+
+
+def log_returns(prices: pd.DataFrame) -> pd.DataFrame:
+    lr = np.log(prices / prices.shift(1)).replace([np.inf, -np.inf], np.nan)
+    return lr.dropna(axis=0, how="any")
+
+
+def return_difference_series(returns: pd.DataFrame, base_ticker: str) -> pd.DataFrame:
+    if base_ticker not in returns.columns:
+        base_ticker = returns.columns[0]
+    diff = pd.DataFrame(index=returns.index)
+    for col in returns.columns:
+        if col != base_ticker:
+            diff[f"{col} minus {base_ticker}"] = returns[col] - returns[base_ticker]
+    return diff.dropna(how="all")
+
+
+def bollinger_frame(series: pd.Series, window: int = 63, n_std: float = 2.0) -> pd.DataFrame:
+    s = series.dropna()
+    out = pd.DataFrame(index=s.index)
+    out["Value"] = s
+    out["Rolling Mean"] = s.rolling(window).mean()
+    out["Upper Band"] = out["Rolling Mean"] + n_std * s.rolling(window).std()
+    out["Lower Band"] = out["Rolling Mean"] - n_std * s.rolling(window).std()
+    out["Z-Score"] = (s - out["Rolling Mean"]) / s.rolling(window).std()
+    return out
+
+
+def rolling_sharpe(r: pd.Series, rf: float, window: int) -> pd.Series:
+    daily_rf = rf / TRADING_DAYS
+    excess = r - daily_rf
+    return excess.rolling(window).mean() / excess.rolling(window).std() * np.sqrt(TRADING_DAYS)
 
 
 def metrics_for_returns(return_map: Dict[str, pd.Series], benchmark: pd.Series, rf: float) -> pd.DataFrame:
@@ -1012,6 +1192,67 @@ def fig_corr(returns: pd.DataFrame) -> go.Figure:
     return layout(fig, "Commodity Return Correlation Matrix", 650)
 
 
+
+def fig_log_return_difference(log_ret: pd.DataFrame, base_ticker: str) -> go.Figure:
+    diff = return_difference_series(log_ret, base_ticker)
+    fig = go.Figure()
+    for i, col in enumerate(diff.columns):
+        fig.add_trace(go.Scatter(
+            x=diff.index,
+            y=diff[col],
+            mode="lines",
+            name=col,
+            line=dict(color=QFA_SEQUENCE[i % len(QFA_SEQUENCE)], width=1.8),
+        ))
+    fig.update_yaxes(title="Daily Log Return Difference")
+    return layout(fig, f"ETF / Instrument Log Return Difference vs {base_ticker}", 720)
+
+
+def fig_log_return_difference_bollinger(log_ret: pd.DataFrame, spread_name: str, window: int, n_std: float) -> go.Figure:
+    if spread_name not in log_ret.columns:
+        base = log_ret.columns[0]
+        diff = return_difference_series(log_ret, base)
+        if diff.empty:
+            return layout(go.Figure(), "Log Return Difference Bollinger Bands")
+        s = diff.iloc[:, 0]
+    else:
+        s = log_ret[spread_name]
+
+    bb = bollinger_frame(s, window=window, n_std=n_std)
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=bb.index, y=bb["Value"], mode="lines", name="Difference", line=dict(color=QFA_COLORS["navy"], width=1.8)))
+    fig.add_trace(go.Scatter(x=bb.index, y=bb["Rolling Mean"], mode="lines", name="Rolling Mean", line=dict(color=QFA_COLORS["muted_gold"], width=2.2)))
+    fig.add_trace(go.Scatter(x=bb.index, y=bb["Upper Band"], mode="lines", name="Upper Band", line=dict(color=QFA_COLORS["slate"], width=1.2, dash="dash")))
+    fig.add_trace(go.Scatter(x=bb.index, y=bb["Lower Band"], mode="lines", name="Lower Band", line=dict(color=QFA_COLORS["slate"], width=1.2, dash="dash"), fill="tonexty", fillcolor="rgba(15, 23, 42, 0.06)"))
+    fig.update_yaxes(title="Log Return Difference")
+    return layout(fig, f"Bollinger Bands — {spread_name}", 760)
+
+
+def fig_rolling_sharpe(strategy_returns: Dict[str, pd.Series], selected: List[str], rf: float, window: int) -> go.Figure:
+    fig = go.Figure()
+    for i, name in enumerate(selected):
+        if name in strategy_returns:
+            rs = rolling_sharpe(strategy_returns[name], rf, window)
+            fig.add_trace(go.Scatter(x=rs.index, y=rs.values, mode="lines", name=name, line=dict(color=color_for_name(name, i), width=2.0)))
+    fig.add_hline(y=0, line_dash="dash", annotation_text="Sharpe = 0")
+    fig.update_yaxes(title="Rolling Sharpe")
+    return layout(fig, f"{window}-Day Rolling Sharpe by Strategy", 720)
+
+
+def fig_underwater_recovery(strategy_returns: Dict[str, pd.Series], selected: List[str]) -> go.Figure:
+    fig = go.Figure()
+    for i, name in enumerate(selected):
+        if name not in strategy_returns:
+            continue
+        r = strategy_returns[name].dropna()
+        eq = (1 + r).cumprod()
+        dd = eq / eq.cummax() - 1
+        fig.add_trace(go.Scatter(x=dd.index, y=dd.values, mode="lines", name=name, line=dict(color=color_for_name(name, i), width=2.0)))
+    fig.update_yaxes(title="Underwater Drawdown", tickformat=".0%")
+    return layout(fig, "Underwater Chart — Strategy Recovery Profile", 720)
+
+
 def fig_garch_best(best: pd.DataFrame, store: Dict[str, Dict[str, Any]]) -> go.Figure:
     fig = go.Figure()
     for _, row in best.iterrows():
@@ -1081,12 +1322,13 @@ def quantstats_html(strategy_name: str, r: pd.Series, rf: float) -> Optional[byt
 # ============================================================
 
 def main():
+    global COMMODITY_UNIVERSE
     st.markdown(
         f"""
         <div class="qfa-hero">
             <h1>QFA Prime Finance Platform</h1>
             <p>Commodity Instrument Class — Institutional Interactive Strategy Lab</p>
-            <p>{VERSION} • Institutional muted theme • 2018+ date controls • Portfolio weights • Optimization • Risk • GARCH • QuantStats</p>
+            <p>{VERSION} • Institutional muted theme • robust Yahoo downloader • ETF proxy/futures modes • Optimization • Risk • GARCH • QuantStats</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -1103,13 +1345,36 @@ def main():
         if st.button("Clear cache"):
             clear_cache()
 
+        universe_mode = st.selectbox(
+            "Data Universe",
+            options=list(UNIVERSE_MODES.keys()),
+            index=0,
+            help="ETF proxy mode uses real Yahoo-listed ETFs and is more stable on Streamlit Cloud. Futures mode uses CL=F, GC=F, SI=F, PL=F, NG=F.",
+        )
+        active_universe = UNIVERSE_MODES[universe_mode]
+        COMMODITY_UNIVERSE = active_universe
+
+        if "ETF Proxies" in universe_mode:
+            st.markdown(
+                "<div class='qfa-transparency-badge'>ETF PROXY MODE ACTIVE — real Yahoo ETFs are used, not futures and not synthetic data.</div>",
+                unsafe_allow_html=True,
+            )
+            with st.expander("Show proxy mapping", expanded=True):
+                st.dataframe(PROXY_TRANSPARENCY_TABLE, use_container_width=True, hide_index=True)
+        else:
+            st.markdown(
+                "<div class='qfa-transparency-badge'>FUTURES MODE ACTIVE — Yahoo futures tickers are used directly.</div>",
+                unsafe_allow_html=True,
+            )
+
         selected_display = st.multiselect(
             "Commodity instruments",
-            options=[v["display"] for v in COMMODITY_UNIVERSE.values()],
-            default=[v["display"] for v in COMMODITY_UNIVERSE.values()],
+            options=[v["display"] for v in active_universe.values()],
+            default=[v["display"] for v in active_universe.values()],
         )
-        display_to_ticker = {v["display"]: k for k, v in COMMODITY_UNIVERSE.items()}
+        display_to_ticker = {v["display"]: k for k, v in active_universe.items()}
         selected_tickers = [display_to_ticker[d] for d in selected_display]
+        st.caption("No synthetic fallback: ETF proxy mode still uses real Yahoo Finance instruments.")
 
         start_date = st.date_input("Start date", DEFAULT_START, min_value=MIN_START_DATE, max_value=DEFAULT_END)
         end_date = st.date_input("End date", DEFAULT_END, min_value=MIN_START_DATE, max_value=DEFAULT_END)
@@ -1136,6 +1401,11 @@ def main():
         rolling_window = st.slider("Rolling window", 21, 252, 63, 21)
         te_target = st.number_input("Tracking Error target", 0.0, 0.50, 0.06, 0.01)
         te_band = st.number_input("Tracking Error band", 0.0, 0.20, 0.02, 0.01)
+
+        st.divider()
+        st.subheader("Advanced Spread / Bollinger")
+        boll_window = st.slider("Bollinger window", 21, 252, 63, 21)
+        boll_std = st.slider("Bollinger standard deviations", 1.0, 3.0, 2.0, 0.25)
 
         st.divider()
         st.subheader("GARCH Controls")
@@ -1169,7 +1439,7 @@ def main():
 
     except Exception as exc:
         st.error(f"Data error: {exc}")
-        st.info("Try fewer instruments, a longer date range, or clear cache.")
+        st.info("Try ETF Proxy mode, fewer instruments, a longer date range, clear cache, or retry later if Yahoo throttles futures metadata.")
         return
 
     strategy_returns, strategy_weights, weights_df, opt_perf = build_strategy_set(prices, returns, rf, max_weight, custom_weights)
@@ -1211,6 +1481,8 @@ def main():
         "VaR / CVaR",
         "Drawdown",
         "Correlation",
+        "Log Return Differences",
+        "Rolling Sharpe",
         "GARCH Volatility Lab",
         "QuantStats",
         "Info Hub",
@@ -1219,15 +1491,18 @@ def main():
     ])
 
     with tabs[0]:
-        st.subheader("Advanced KPI Layout")
+        st.subheader("Advanced Institutional KPI Layout")
+        mode_label = "ETF Proxy" if "ETF Proxies" in universe_mode else "Futures"
         st.markdown(
             f"""
             <div class="qfa-note">
-            Primary strategy: <b>{primary}</b>. Use sidebar to change strategy visibility, custom weights, rolling window, RF rate and optimization constraints.
+            Primary strategy: <b>{primary}</b>. Active data mode: <b>{mode_label}</b>.
+            Sidebar parameters remain active: custom weights, RF rate, max weight constraint, rolling window, TE bands, GARCH model set and Bollinger settings.
             </div>
             """,
             unsafe_allow_html=True,
         )
+        st.markdown("<div class='qfa-kpi-band'><div class='qfa-kpi-band-title'>Portfolio Risk / Return Command Center</div>", unsafe_allow_html=True)
         c = st.columns(8)
         with c[0]: kpi_card("Annual Return", fmt_pct(primary_row["Annual Return"]), primary, tone_for_return(primary_row["Annual Return"]))
         with c[1]: kpi_card("Annual Volatility", fmt_pct(primary_row["Annual Volatility"]), "risk level", "neutral")
@@ -1237,6 +1512,15 @@ def main():
         with c[5]: kpi_card("CVaR 95%", fmt_pct(primary_row["CVaR 95% Daily"]), "tail loss", "bad")
         with c[6]: kpi_card("Tracking Error", fmt_pct(primary_row["Tracking Error vs Benchmark"]), "vs ^GSPC", tone_for_te(primary_row["Tracking Error vs Benchmark"]))
         with c[7]: kpi_card("Beta", fmt_num(primary_row["Beta vs Benchmark"]), "vs ^GSPC", "neutral")
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        c2 = st.columns(5)
+        with c2[0]: kpi_card("Data Mode", mode_label, "transparent source", "neutral")
+        with c2[1]: kpi_card("Instruments", str(len(selected_tickers)), "selected", "neutral")
+        with c2[2]: kpi_card("Obs.", str(len(returns)), "daily aligned", "neutral")
+        with c2[3]: kpi_card("Max Weight", fmt_pct(max_weight), "optimization cap", "neutral")
+        with c2[4]: kpi_card("Rolling Window", str(rolling_window), "trading days", "neutral")
 
         safe_chart(fig_strategy_cumulative(strategy_returns, benchmark_returns, selected_strategies))
         safe_chart(fig_risk_return(strategy_metrics))
@@ -1298,6 +1582,7 @@ def main():
     with tabs[8]:
         st.subheader("Drawdown")
         safe_chart(fig_drawdowns(strategy_returns, benchmark_returns, selected_strategies))
+        safe_chart(fig_underwater_recovery(strategy_returns, selected_strategies))
 
     with tabs[9]:
         st.subheader("Correlation")
@@ -1306,6 +1591,33 @@ def main():
         safe_df(instrument_metrics)
 
     with tabs[10]:
+        st.subheader("ETF / Instrument Log Return Differences and Bollinger Bands")
+        st.markdown(
+            "<div class='qfa-note'>This tab shows log-return differences between selected instruments. In ETF Proxy mode, this makes proxy behavior transparent. Bollinger bands help identify unusual relative-return deviations.</div>",
+            unsafe_allow_html=True,
+        )
+        lr = log_returns(prices)
+        base_ticker = st.selectbox(
+            "Base ticker for log-return differences",
+            options=list(lr.columns),
+            index=0,
+            format_func=lambda t: COMMODITY_UNIVERSE.get(t, {}).get("display", t),
+        )
+        diff = return_difference_series(lr, base_ticker)
+        safe_chart(fig_log_return_difference(lr, base_ticker))
+        if not diff.empty:
+            spread_choice = st.selectbox("Spread for Bollinger analysis", options=list(diff.columns), index=0)
+            safe_chart(fig_log_return_difference_bollinger(diff, spread_choice, boll_window, boll_std))
+            safe_df(diff.tail(250).reset_index().rename(columns={"index": "Date"}))
+        else:
+            st.info("No spread available. Select at least two instruments.")
+
+    with tabs[11]:
+        st.subheader("Rolling Sharpe")
+        safe_chart(fig_rolling_sharpe(strategy_returns, selected_strategies, rf, rolling_window))
+        st.markdown("<div class='qfa-note'>Rolling Sharpe helps users understand whether risk-adjusted performance is stable or only period-specific.</div>", unsafe_allow_html=True)
+
+    with tabs[12]:
         st.subheader("GARCH Volatility Lab")
         st.markdown("<div class='qfa-note'>GARCH is fitted to individual commodities, not portfolio strategies.</div>", unsafe_allow_html=True)
         if run_garch:
@@ -1330,7 +1642,7 @@ def main():
         else:
             st.info("Enable 'Run GARCH Lab' in the sidebar.")
 
-    with tabs[11]:
+    with tabs[13]:
         st.subheader("QuantStats")
         st.markdown("<div class='qfa-note'>QuantStats report is generated for the selected strategy return stream.</div>", unsafe_allow_html=True)
         qs_strategy = st.selectbox("QuantStats strategy", options=all_strategy_names, index=all_strategy_names.index(primary) if primary in all_strategy_names else 0)
@@ -1345,8 +1657,12 @@ def main():
         else:
             st.warning("QuantStats unavailable or report generation failed.")
 
-    with tabs[12]:
+    with tabs[14]:
         st.subheader("Info Hub")
+        st.subheader("Proxy Transparency")
+        safe_df(PROXY_TRANSPARENCY_TABLE)
+        st.caption("ETF proxy mode is explicit and visible. It is not synthetic data and not hidden futures replacement.")
+
         info_df = pd.DataFrame([
             {"Ticker": k, "Display Name": v["display"], "Full Name": v["name"], "Instrument Class": v["class"], "Source": "Yahoo Finance"}
             for k, v in COMMODITY_UNIVERSE.items()
@@ -1369,12 +1685,12 @@ def main():
             {"Item": "Benchmark", "Value": f"{BENCHMARK_NAME} ({BENCHMARK_TICKER})"},
         ]))
 
-    with tabs[13]:
+    with tabs[15]:
         st.subheader("Data Quality")
         safe_df(quality)
         st.caption(f"Aligned prices: {prices.shape}; aligned returns: {returns.shape}; benchmark returns: {benchmark_returns.shape}")
 
-    with tabs[14]:
+    with tabs[16]:
         st.subheader("Export Center")
         col1, col2, col3 = st.columns(3)
         with col1:

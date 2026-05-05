@@ -1,25 +1,22 @@
-# QFA Prime Finance Platform — Streamlit v4.1 Institutional Theme
+# QFA Prime Finance Platform — Streamlit v4.3 Institutional Transparency
 
-## Updates in v4.1
+## v4.3 updates
 
-- Muted institutional color palette
-- Plotly default rainbow colors removed
-- Navy / slate / muted gold / gray palette
-- KPI alert colors made darker and more professional
-- Date selection locked to 2018-01-01 or later
-- All previous v4 features preserved
+- ETF proxy mode is explicitly visible in sidebar
+- Proxy mapping table is shown to the user
+- Futures mode remains selectable
+- No synthetic fallback
+- Advanced institutional KPI layout
+- Additional KPI command center row
+- Log-return difference tab
+- Bollinger bands for return-difference spreads
+- Rolling Sharpe tab
+- Underwater recovery chart
+- All previous parameters and features preserved
 
 ## Run
 
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
-```
-
-## Streamlit Cloud
-
-Main file path:
-
-```text
-app.py
 ```
